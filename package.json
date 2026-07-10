@@ -1,0 +1,10 @@
+{
+  "name": "katari-package-imagegen",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "FFI sidecar dependencies for the Katari `imagegen` package (src/imagegen.ts).",
+  "dependencies": {
+    "@katari-lang/port": "0.1.0-rc7"
+  }
+}

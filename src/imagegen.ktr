@@ -1,0 +1,43 @@
+// A self-contained image-editing tool over the Gemini image model ("nano banana"): hand it an image
+// `file` + an instruction, get an edited image `file` back. The API call lives in the sidecar
+// (`imagegen.ts`) because the response image must become a blob — the sidecar uploads it over the
+// blob side channel (`context.file`) and returns the handle, which lifts into a `file` for the
+// caller. Wiring is the usual one-liner:
+// `use imagegen.provider(api_key = env.get_secret(key = "GEMINI_API_KEY"))`.
+
+@"The image-model API key capability (provided once at the root by `use imagegen.provider(...)`)."
+request get_imagegen_key() -> string of private
+
+@"Provide the image-model API key (and model id) for the extent of the continuation."
+agent provider[R, effect E](
+  api_key: string of private,
+  model: string ?= "gemini-2.5-flash-image",
+  continuation: agent (value: null) -> R with {...E, get_imagegen_key, get_imagegen_model},
+) -> R with E {
+  use handler (var key = api_key) {
+    request get_imagegen_key() { next key }
+  }
+  use handler (var chosen = model) {
+    request get_imagegen_model() { next chosen }
+  }
+  continuation(value = null)
+}
+
+@"The image model id capability (defaulted by the provider; override via its @model@)."
+request get_imagegen_model() -> string
+
+@"Run one image edit in the sidecar: POST the image + instruction to the Gemini image model, upload
+the returned image as a blob, hand back its `file`."
+external agent gemini_image_edit(image: file, instruction: string, model: string, api_key: string of private) -> file
+
+@"Tool: edit an image with an instruction (e.g. \"make the sky a sunset\", \"remove the text\").
+Pass the image's handle object — a bare {\"$ref\": \"<id>\"} suffices; the result is a new image
+file you can view (`view_image`) or post (`send_files`)."
+agent edit_image(image: file, instruction: string) -> file {
+  gemini_image_edit(
+    image = image,
+    instruction = instruction,
+    model = get_imagegen_model(),
+    api_key = get_imagegen_key(),
+  )
+}
