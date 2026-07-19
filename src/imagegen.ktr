@@ -31,7 +31,7 @@ the returned image as a blob, hand back its `file`."
 external agent gemini_image_edit(image: file, instruction: string, model: string, api_key: string of private) -> file
 
 @"Tool: edit an image with an instruction (e.g. \"make the sky a sunset\", \"remove the text\").
-Pass the image's handle object — a bare {\"$ref\": \"<id>\"} suffices; the result is a new image
+Pass the image's handle object — a bare {\"$katari_ref\": \"<id>\"} suffices; the result is a new image
 file you can view (`view_image`) or post (`send_files`)."
 agent edit_image(image: file, instruction: string) -> file {
   gemini_image_edit(
