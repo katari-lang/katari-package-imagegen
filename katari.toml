@@ -1,13 +1,10 @@
 [package]
 name = "imagegen"
-version = "0.1.0"
-description = "Edit images with the Gemini image model as a Katari tool. Ships an FFI sidecar (imagegen.ts)."
+version = "0.1.1"
+description = "Edit images with the Gemini image model as a Katari tool. Pure Katari — no sidecar."
 
 [runtime]
 url = "http://localhost:3000"
-
-# The sidecar's source root defaults to [package].src ("src"), where imagegen.ts lives alongside
-# imagegen.ktr, so no explicit [sidecar] section is needed — `katari apply` bundles it.
 
 [dependencies]
 registry = "https://raw.githubusercontent.com/katari-lang/katari-registry/main"

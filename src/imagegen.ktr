@@ -1,43 +1,102 @@
-// A self-contained image-editing tool over the Gemini image model ("nano banana"): hand it an image
-// `file` + an instruction, get an edited image `file` back. The API call lives in the sidecar
-// (`imagegen.ts`) because the response image must become a blob — the sidecar uploads it over the
-// blob side channel (`context.file`) and returns the handle, which lifts into a `file` for the
-// caller. Wiring is the usual one-liner:
-// `use imagegen.provider(api_key = env.get_secret(key = "GEMINI_API_KEY"))`.
+// An image-editing library over the Gemini image model ("nano banana"): hand it an image `file` + an
+// instruction, get an edited image `file` back — PURE Katari, no sidecar. The input image rides the
+// request body as a file value in the `inlineData.data` slot (`http.json` base64s it only at the send
+// boundary, so the content never enters the value plane); the response's first image part becomes a
+// real `file` through `files.from_base64`. A reply with no image is the typed `no_image` (the model
+// refused, or answered in text) — never a panic. The capability follows the credentials unification:
+// `use imagegen.provider(source = credentials.env(key = "GEMINI_API_KEY"))`.
 
-@"The image-model API key capability (provided once at the root by `use imagegen.provider(...)`)."
-request get_imagegen_key() -> string of private
+@"The image-model credential capability — provided at the root by `use imagegen.provider(...)`,
+resolved per call (an env rotation or an oauth refresh lands without a restart)."
+request credential() -> string of private
 
-@"Provide the image-model API key (and model id) for the extent of the continuation."
+@"The image model id capability (defaulted by the provider; override via its @model@)."
+request image_model() -> string
+
+@"Provide the `credential` (from @source@ — a NAME, resolved at each use) and the model id for the
+extent of the continuation."
 agent provider[R, effect E](
-  api_key: string of private,
+  source: credentials.source,
   model: string ?= "gemini-2.5-flash-image",
-  continuation: agent (value: null) -> R with {...E, get_imagegen_key, get_imagegen_model},
-) -> R with E {
-  use handler (var key = api_key) {
-    request get_imagegen_key() { next key }
+  continuation: agent (value: null) -> R with {...E, credential, image_model},
+) -> R with E | io | prelude.throw[env.missing_secret | oauth.server_error] {
+  use handler {
+    request credential() -> string of private { next credentials.resolve(source = source) }
   }
   use handler (var chosen = model) {
-    request get_imagegen_model() { next chosen }
+    request image_model() -> string { next chosen }
   }
   continuation(value = null)
 }
 
-@"The image model id capability (defaulted by the provider; override via its @model@)."
-request get_imagegen_model() -> string
+@"The model answered without an image — a refusal or a text answer; @message@ carries whatever it
+said. Typed, so a tool wrapper can hand the text back to the model instead of failing the run."
+data no_image(message: string)
 
-@"Run one image edit in the sidecar: POST the image + instruction to the Gemini image model, upload
-the returned image as a blob, hand back its `file`."
-external agent gemini_image_edit(image: file, instruction: string, model: string, api_key: string of private) -> file
+@"The first candidate's content parts of a generateContent reply, read totally — any missing layer
+degrades to the empty list rather than throwing."
+agent response_parts(response: unknown) -> array[unknown] {
+  match (json.field(target = response, key = "candidates")) {
+    case array(candidates) -> match (array.get(target = candidates, index = 0)) {
+      case null -> []
+      case first -> match (json.field(target = json.field(target = first, key = "content"), key = "parts")) {
+        case array(parts) -> parts
+        case _ -> []
+      }
+    }
+    case _ -> []
+  }
+}
+
+@"One part's inline-image MIME type, defaulting to image/png when the reply omits it."
+agent part_content_type(part: unknown) -> string {
+  let recorded = json.text(target = json.field(target = json.field(target = part, key = "inlineData"), key = "mimeType"))
+  if (recorded == "") { "image/png" } else { recorded }
+}
 
 @"Tool: edit an image with an instruction (e.g. \"make the sky a sunset\", \"remove the text\").
 Pass the image's handle object — a bare {\"$katari_ref\": \"<id>\"} suffices; the result is a new image
-file you can view (`view_image`) or post (`send_files`)."
+file you can view (`view_image`) or post (`send_files`). A reply without an image throws the typed
+`no_image` carrying the model's text."
 agent edit_image(image: file, instruction: string) -> file {
-  gemini_image_edit(
-    image = image,
-    instruction = instruction,
-    model = get_imagegen_model(),
-    api_key = get_imagegen_key(),
+  let response = http.post_json(
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/${image_model()}:generateContent",
+    body = {
+      contents = [
+        {
+          role = "user",
+          parts = [
+            // The file value sits directly in the `data` slot; `http.json` base64s it at the send
+            // boundary (no `read_base64`), exactly the ai package's gemini wire shape.
+            { inlineData = { mimeType = files.content_type(value = image), "data" = image } },
+            { text = instruction },
+          ],
+        },
+      ],
+    },
+    headers = { "x-goog-api-key" = credential() },
   )
+  let parts = response_parts(response = response)
+  // The first image part, via the flatten idiom (map each part to [file] or []).
+  let images = array.flatten(target = for (let part in parts) {
+    next match (json.field(target = json.field(target = part, key = "inlineData"), key = "data")) {
+      case string(data_text) -> [files.from_base64(content = data_text, content_type = part_content_type(part = part))]
+      case _ -> []
+    }
+  })
+  match (array.get(target = images, index = 0)) {
+    case null -> {
+      // No image came back — surface whatever the model said instead (a refusal, a clarification).
+      let texts = array.flatten(target = for (let part in parts) {
+        next match (json.field(target = part, key = "text")) {
+          case string(text) -> [text]
+          case _ -> []
+        }
+      })
+      let joined = string.join(parts = texts, separator = " ")
+      let message = if (joined == "") { "image edit returned no image" } else { f"image edit returned no image: ${joined}" }
+      prelude.throw(error = no_image(message = message))
+    }
+    case edited -> edited
+  }
 }
