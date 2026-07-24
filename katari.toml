@@ -1,7 +1,7 @@
 [package]
 name = "imagegen"
-version = "0.1.1"
-description = "Edit images with the Gemini image model as a Katari tool. Pure Katari — no sidecar."
+version = "0.1.2"
+description = "Generate and edit images with the Gemini image model as Katari tools. Pure Katari — no sidecar."
 
 [runtime]
 url = "http://localhost:3000"

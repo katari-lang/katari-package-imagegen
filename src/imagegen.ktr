@@ -1,9 +1,10 @@
-// An image-editing library over the Gemini image model ("nano banana"): hand it an image `file` + an
-// instruction, get an edited image `file` back — PURE Katari, no sidecar. The input image rides the
-// request body as a file value in the `inlineData.data` slot (`http.json` base64s it only at the send
-// boundary, so the content never enters the value plane); the response's first image part becomes a
-// real `file` through `files.from_base64`. A reply with no image is the typed `no_image` (the model
-// refused, or answered in text) — never a panic. The capability follows the credentials unification:
+// An image library over the Gemini image model ("nano banana"): generate an image `file` from a text
+// prompt, or hand it an image `file` + an instruction to get an edited image `file` back — PURE
+// Katari, no sidecar. An edit's input image rides the request body as a file value in the
+// `inlineData.data` slot (`http.json` base64s it only at the send boundary, so the content never
+// enters the value plane); the response's first image part becomes a real `file` through
+// `files.from_base64`. A reply with no image is the typed `no_image` (the model refused, or answered
+// in text) — never a panic. The capability follows the credentials unification:
 // `use imagegen.provider(source = credentials.env(key = "GEMINI_API_KEY"))`.
 
 @"The image-model credential capability — provided at the root by `use imagegen.provider(...)`,
@@ -98,5 +99,48 @@ agent edit_image(image: file, instruction: string) -> file {
       prelude.throw(error = no_image(message = message))
     }
     case edited -> edited
+  }
+}
+
+@"Tool: generate an image from a text prompt (e.g. \"a watercolor fox\", \"a minimalist mountain logo\").
+The result is a new image file you can view (`view_image`) or post (`send_files`). A reply without an
+image throws the typed `no_image` carrying the model's text."
+agent generate_image(prompt: string) -> file {
+  let response = http.post_json(
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/${image_model()}:generateContent",
+    body = {
+      contents = [
+        {
+          role = "user",
+          parts = [
+            { text = prompt },
+          ],
+        },
+      ],
+    },
+    headers = { "x-goog-api-key" = credential() },
+  )
+  let parts = response_parts(response = response)
+  // The first image part, via the flatten idiom (map each part to [file] or []).
+  let images = array.flatten(target = for (let part in parts) {
+    next match (json.field(target = json.field(target = part, key = "inlineData"), key = "data")) {
+      case string(data_text) -> [files.from_base64(content = data_text, content_type = part_content_type(part = part))]
+      case _ -> []
+    }
+  })
+  match (array.get(target = images, index = 0)) {
+    case null -> {
+      // No image came back — surface whatever the model said instead (a refusal, a clarification).
+      let texts = array.flatten(target = for (let part in parts) {
+        next match (json.field(target = part, key = "text")) {
+          case string(text) -> [text]
+          case _ -> []
+        }
+      })
+      let joined = string.join(parts = texts, separator = " ")
+      let message = if (joined == "") { "image generation returned no image" } else { f"image generation returned no image: ${joined}" }
+      prelude.throw(error = no_image(message = message))
+    }
+    case generated -> generated
   }
 }
