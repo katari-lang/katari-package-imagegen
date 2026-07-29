@@ -1,6 +1,6 @@
 [package]
 name = "imagegen"
-version = "0.2.0"
+version = "0.3.0"
 description = "Generate and edit images with the Gemini image model as Katari tools. Pure Katari — no sidecar."
 
 [runtime]

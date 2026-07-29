@@ -12,19 +12,32 @@ the value plane.
 - `imagegen.edit_image(image, instruction)` — the tool: e.g. "make the sky a sunset", "remove the
   text". Returns a new image `file`.
 - `imagegen.provider(source = ..., model ?= "gemini-2.5-flash-image")` — provides the image-model
-  credential (and model id) for the extent of a continuation.
+  capability for the extent of a continuation. One request, `imagegen.credential`, hands a call the
+  whole `imagegen.connection(model, api_key)`: the model id is provider **configuration** held in the
+  handler's state, not a capability of its own (0.3.0 — it used to be a second request,
+  `imagegen.image_model`, which is gone).
 
 ## Failures
 
 - A reply that carries **no image** — the model refused, or answered in text — is the typed
   `imagegen.no_image(message)`, carrying whatever it said. Never a panic, so a tool wrapper can hand
   the text back to the model instead of failing the run.
-- A failed call is `http.api_failure`, classified: **`http.auth_error`** for a 401/403 (the key is what
-  failed, so a fresh *resolution* is the recovery — the shape a `replay` converter composes around) and
-  **`http.api_error`** for every other non-2xx (a rejected prompt, a rate limit, an unknown model),
-  carrying the server's own body as the diagnosis. That is the stdlib's vocabulary, so one converter in
-  the app covers this package alongside every other authenticated REST integration it composes.
+- A failed call is `http.api_failure`, classified by the stdlib's `http.classify_status` (0.3.0 — this
+  package used to carry its own copy of the same two-arm match): **`http.auth_error`** for a 401/403
+  (the key is what failed, so a fresh *resolution* is the recovery — the shape a `replay` converter
+  composes around) and **`http.api_error`** for every other non-2xx (a rejected prompt, a rate limit,
+  an unknown model). Both carry `status`, `context` (`"image generation"` / `"image edit"`) and
+  `message` (the server's own body verbatim, the diagnosis a model reads and adjusts to), so a retry
+  policy downstream reads a **number** instead of searching a sentence. One converter in the app
+  covers this package alongside every other authenticated REST integration it composes.
 - A request that never completes is `http.fetch_error`; a 2xx that is not JSON is `json.parse_error`.
+
+**Breaking in 0.3.0**: the `imagegen.image_model` request is gone — drop it from any effect row that
+spelled it, and configure the model through `provider(model = ...)` as before. `imagegen.credential`
+now answers `imagegen.connection(model, api_key)` rather than a bare `string of private`.
+`imagegen.classify_error` is gone — call `http.classify_status(status, context, message)`. The failure
+`message` is now the server's body alone; the call name and the status ride on the error's own
+`context` / `status` fields rather than being folded into the sentence.
 
 ## Secrets / env
 

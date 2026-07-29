@@ -9,30 +9,41 @@
 //
 // Both tools are one call each above `generated_image`: the endpoint, the api-key header, the failure
 // classification and the read of the reply are written ONCE there, and what stays in each tool is the
-// user parts it builds. A failed call arrives as `http.api_failure` — `http.auth_error` for a 401/403
-// (the key is what failed; a fresh RESOLUTION is the recovery) and `http.api_error` for every other
-// non-2xx — rather than as the transport's bare `http.status_error`, so the caller's one converter
-// over the stdlib vocabulary covers this package too.
+// user parts it builds. A failed call arrives as `http.api_failure` — classified by the stdlib's
+// `http.classify_status`: `http.auth_error` for a 401/403 (the key is what failed; a fresh RESOLUTION
+// is the recovery) and `http.api_error` for every other non-2xx — rather than as the transport's bare
+// `http.status_error`, so the caller's one converter over the stdlib vocabulary covers this package
+// too, and where the line falls is decided in one place for every package that draws it.
+//
+// The MODEL ID is provider CONFIGURATION, not a second capability: it is an argument of `provider`,
+// held in its handler state, and it rides back on the ONE `credential` request together with the key
+// a call authenticates with — the same shape the `ai` providers give their `connection`.
 
-@"The image-model credential capability — provided at the root by `use imagegen.provider(...)`,
-resolved per call (an env rotation or an oauth refresh lands without a restart)."
-request credential() -> string of private
+@"What one image call runs against: the @model@ id it targets, and the @api_key@ it authenticates with
+(a `string of private`, protected by its taint)."
+data connection(
+  @"The image model id this call targets." model: string,
+  @"The Gemini API key, resolved for this call." api_key: string of private,
+)
 
-@"The image model id capability (defaulted by the provider; override via its @model@)."
-request image_model() -> string
+@"The image-model capability — provided at the root by `use imagegen.provider(...)`. It hands back the
+whole `connection`, not just the key: the model id is the provider's CONFIGURATION (an argument of
+`provider`, held in its handler state), not a capability of its own, so a call learns what it is
+calling and as whom in ONE request instead of two. The credential half is resolved per call, so an env
+rotation or an oauth refresh lands without a restart."
+request credential() -> connection
 
-@"Provide the `credential` (from @source@ — a NAME, resolved at each use) and the model id for the
-extent of the continuation."
+@"Provide the image-model capability for the extent of the continuation: the credential named by
+@source@ (a NAME, resolved at each use) and the @model@ every call targets, served together."
 agent provider[R, effect E](
   source: credentials.source,
-  model: string ?= "gemini-2.5-flash-image",
-  continuation: agent (value: null) -> R with {...E, credential, image_model},
+  @"The image model id every call targets — provider configuration, held in the handler's state." model: string ?= "gemini-2.5-flash-image",
+  continuation: agent (value: null) -> R with {...E, credential},
 ) -> R with E | io | prelude.throw[env.missing_secret | oauth.server_error] {
-  use handler {
-    request credential() -> string of private { next credentials.resolve(source = source) }
-  }
   use handler (var chosen = model) {
-    request image_model() -> string { next chosen }
+    request credential() -> connection {
+      next connection(model = chosen, api_key = credentials.resolve(source = source))
+    }
   }
   continuation(value = null)
 }
@@ -62,52 +73,38 @@ agent part_content_type(part: unknown) -> string {
   if (recorded == "") { "image/png" } else { recorded }
 }
 
-@"Classify a failed generateContent response into `http.api_failure`, at the ONE boundary where both
-tools read a reply. A 401 or 403 is the CREDENTIAL failing — the Gemini key is wrong, revoked, or not
-entitled to the image model — surfaced as `http.auth_error`, which a `replay` converter turns into a
-fresh resolution of the credential (and, when it cannot be refreshed, the runtime's re-authorization
-park). Every other non-2xx is an `http.api_error`: a rejected prompt, a rate limit, a model name that
-does not exist — nothing a re-resolution would help, and the server's body is the diagnosis a model
-reads and adjusts to.
-
-The classification is a match on a status, four lines long, so it lives HERE rather than behind a
-dependency: `google_common.classify_api_error` draws the same line for the Google packages, but it is
-the LINE that is shared, not the code — the stdlib's `http.api_failure` is the shared vocabulary, and
-one `replay` converter over it already covers this package alongside gmail and google_calendar.
-@context@ names the call (\"image edit\", \"image generation\") for the message."
-agent classify_error(context: string, status: integer, body: string) -> http.api_failure {
-  let status_text = string.to_string(value = status)
-  let message = f"${context} failed (status ${status_text}): ${body}"
-  match (status) {
-    case 401 -> http.auth_error(message = message)
-    case 403 -> http.auth_error(message = message)
-    case _ -> http.api_error(message = message)
-  }
-}
-
 @"POST a generateContent turn whose user @parts@ are the caller's, and hand back the reply's parsed
 document — the ONE wire call both tools make (same endpoint, same api-key header), so only the parts
 differ between generating and editing.
 
 A non-2xx arrives here as the transport's `http.status_error` and leaves as `http.api_failure`,
-classified: this is the one boundary where the status is read, and above it no caller sees a bare
-status again. A transport failure (`http.fetch_error`) and a 2xx that is not JSON (`json.parse_error`)
-are NOT statuses to classify, so the residual rethrows them as bound."
+classified by the stdlib's `http.classify_status`: this is the one boundary where the status is read,
+and above it no caller sees a bare status again. A 401 or 403 becomes `http.auth_error` — the Gemini
+key is wrong, revoked, or not entitled to the image model, and a `replay` converter turns that into a
+fresh resolution of the credential (and, when it cannot be refreshed, the runtime's re-authorization
+park). Every other non-2xx becomes `http.api_error` — a rejected prompt, a rate limit, a model name
+that does not exist — carrying the server's body verbatim, because it is the diagnosis a model reads
+and adjusts to, and the STATUS onward, so a retry policy downstream reads a number. @context@ names
+the call (\"image edit\", \"image generation\") on whichever variant comes out. A transport failure
+(`http.fetch_error`) and a 2xx that is not JSON (`json.parse_error`) are NOT statuses to classify, so
+the residual rethrows them as bound."
 agent generate_content(parts: array[unknown], context: string) -> unknown {
   use handler {
     request prelude.throw(error: http.status_error | http.fetch_error | json.parse_error) -> never {
       match (error) {
         case http.status_error(status => status, body => body) ->
-          prelude.throw(error = classify_error(context = context, status = status, body = body))
+          prelude.throw(error = http.classify_status(status = status, context = context, message = body))
         // The residual is `fetch_error | parse_error` — rethrown as bound, no reconstruction.
         case rest -> prelude.throw(error = rest)
       }
     }
   }
+  // One request for both halves: the model this call targets and the key it authenticates with.
+  let client = credential()
   http.post_json(
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/${image_model()}:generateContent",
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/${client.model}:generateContent",
     body = { contents = [{ role = "user", parts = parts }] },
-    headers = { "x-goog-api-key" = credential() },
+    headers = { "x-goog-api-key" = client.api_key },
   )
 }
 
