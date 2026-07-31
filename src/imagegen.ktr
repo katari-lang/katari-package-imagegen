@@ -80,7 +80,7 @@ differ between generating and editing.
 A non-2xx arrives here as the transport's `http.status_error` and leaves as `http.api_failure`,
 classified by the stdlib's `http.classify_status`: this is the one boundary where the status is read,
 and above it no caller sees a bare status again. A 401 or 403 becomes `http.auth_error` — the Gemini
-key is wrong, revoked, or not entitled to the image model, and a `replay` converter turns that into a
+key is wrong, revoked, or not entitled to the image model, and a `supervise` converter turns that into a
 fresh resolution of the credential (and, when it cannot be refreshed, the runtime's re-authorization
 park). Every other non-2xx becomes `http.api_error` — a rejected prompt, a rate limit, a model name
 that does not exist — carrying the server's body verbatim, because it is the diagnosis a model reads

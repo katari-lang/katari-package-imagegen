@@ -24,7 +24,7 @@ the value plane.
   the text back to the model instead of failing the run.
 - A failed call is `http.api_failure`, classified by the stdlib's `http.classify_status` (0.3.0 — this
   package used to carry its own copy of the same two-arm match): **`http.auth_error`** for a 401/403
-  (the key is what failed, so a fresh *resolution* is the recovery — the shape a `replay` converter
+  (the key is what failed, so a fresh *resolution* is the recovery — the shape a `supervise` converter
   composes around) and **`http.api_error`** for every other non-2xx (a rejected prompt, a rate limit,
   an unknown model). Both carry `status`, `context` (`"image generation"` / `"image edit"`) and
   `message` (the server's own body verbatim, the diagnosis a model reads and adjusts to), so a retry
