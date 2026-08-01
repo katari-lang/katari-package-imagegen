@@ -1,43 +1,26 @@
-// An image library over the Gemini image model ("nano banana"): generate an image `file` from a text
-// prompt, or hand it an image `file` + an instruction to get an edited image `file` back — PURE
-// Katari, no sidecar. An edit's input image rides the request body as a file value in the
-// `inlineData.data` slot (`http.json` base64s it only at the send boundary, so the content never
-// enters the value plane); the response's first image part becomes a real `file` through
-// `files.from_base64`. A reply with no image is the typed `no_image` (the model refused, or answered
-// in text) — never a panic. The capability follows the credentials unification:
-// `use imagegen.provider(source = credentials.env(key = "GEMINI_API_KEY"))`.
+// Image generation and editing over the Gemini image model — pure Katari, no sidecar. Generate an
+// image `file` from a prompt, or edit one from a `file` plus an instruction.
 //
-// Both tools are one call each above `generated_image`: the endpoint, the api-key header, the failure
-// classification and the read of the reply are written ONCE there, and what stays in each tool is the
-// user parts it builds. A failed call arrives as `http.api_failure` — classified by the stdlib's
-// `http.classify_status`: `http.auth_error` for a 401/403 (the key is what failed; a fresh RESOLUTION
-// is the recovery) and `http.api_error` for every other non-2xx — rather than as the transport's bare
-// `http.status_error`, so the caller's one converter over the stdlib vocabulary covers this package
-// too, and where the line falls is decided in one place for every package that draws it.
-//
-// The MODEL ID is provider CONFIGURATION, not a second capability: it is an argument of `provider`,
-// held in its handler state, and it rides back on the ONE `credential` request together with the key
-// a call authenticates with — the same shape the `ai` providers give their `connection`.
+// An edit's input image rides the request body as a file value in the `inlineData.data` slot;
+// `http.json` base64s it at the send boundary, so its content never enters the value plane.
 
-@"What one image call runs against: the @model@ id it targets, and the @api_key@ it authenticates with
-(a `string of private`, protected by its taint)."
+@"What one image call runs against: the @model@ id it targets and the @api_key@ it authenticates
+with."
 data connection(
   @"The image model id this call targets." model: string,
   @"The Gemini API key, resolved for this call." api_key: string of private,
 )
 
-@"The image-model capability — provided at the root by `use imagegen.provider(...)`. It hands back the
-whole `connection`, not just the key: the model id is the provider's CONFIGURATION (an argument of
-`provider`, held in its handler state), not a capability of its own, so a call learns what it is
-calling and as whom in ONE request instead of two. The credential half is resolved per call, so an env
-rotation or an oauth refresh lands without a restart."
+@"The image-model capability, provided by `use imagegen.provider(...)`. It answers the whole
+`connection` — the model id the provider was configured with, plus the key, resolved per call so a
+rotation lands without a restart."
 request credential() -> connection
 
 @"Provide the image-model capability for the extent of the continuation: the credential named by
-@source@ (a NAME, resolved at each use) and the @model@ every call targets, served together."
+@source@ (a name, resolved at each use) and the @model@ every call targets."
 agent provider[R, effect E](
   source: credentials.source,
-  @"The image model id every call targets — provider configuration, held in the handler's state." model: string ?= "gemini-2.5-flash-image",
+  @"The image model id every call targets." model: string ?= "gemini-2.5-flash-image",
   continuation: agent (value: null) -> R with {...E, credential},
 ) -> R with E | io | prelude.throw[env.missing_secret | oauth.server_error] {
   use handler (var chosen = model) {
@@ -48,12 +31,11 @@ agent provider[R, effect E](
   continuation(value = null)
 }
 
-@"The model answered without an image — a refusal or a text answer; @message@ carries whatever it
-said. Typed, so a tool wrapper can hand the text back to the model instead of failing the run."
+@"The model answered without an image — a refusal or a text answer; @message@ carries what it said."
 data no_image(message: string)
 
-@"The first candidate's content parts of a generateContent reply, read totally — any missing layer
-degrades to the empty list rather than throwing."
+@"The first candidate's content parts of a generateContent reply; any missing layer degrades to the
+empty list."
 agent response_parts(response: unknown) -> array[unknown] {
   match (json.field(target = response, key = "candidates")) {
     case array(candidates) -> match (array.get(target = candidates, index = 0)) {
@@ -73,52 +55,24 @@ agent part_content_type(part: unknown) -> string {
   if (recorded == "") { "image/png" } else { recorded }
 }
 
-@"POST a generateContent turn whose user @parts@ are the caller's, and hand back the reply's parsed
-document — the ONE wire call both tools make (same endpoint, same api-key header), so only the parts
-differ between generating and editing.
-
-A non-2xx arrives here as the transport's `http.status_error` and leaves as `http.api_failure`,
-classified by the stdlib's `http.classify_status`: this is the one boundary where the status is read,
-and above it no caller sees a bare status again. A 401 or 403 becomes `http.auth_error` — the Gemini
-key is wrong, revoked, or not entitled to the image model, and a `supervise` converter turns that into a
-fresh resolution of the credential (and, when it cannot be refreshed, the runtime's re-authorization
-park). Every other non-2xx becomes `http.api_error` — a rejected prompt, a rate limit, a model name
-that does not exist — carrying the server's body verbatim, because it is the diagnosis a model reads
-and adjusts to, and the STATUS onward, so a retry policy downstream reads a number. @context@ names
-the call (\"image edit\", \"image generation\") on whichever variant comes out. A transport failure
-(`http.fetch_error`) and a 2xx that is not JSON (`json.parse_error`) are NOT statuses to classify, so
-the residual rethrows them as bound."
+@"POST a generateContent turn whose user @parts@ are the caller's and hand back the parsed reply. A
+non-2xx throws `http.api_failure` — `http.auth_error` for a 401/403, `http.api_error` otherwise —
+carrying the status and the server's body; @context@ names the call in the message."
 agent generate_content(parts: array[unknown], context: string) -> unknown {
-  use handler {
-    request prelude.throw(error: http.status_error | http.fetch_error | json.parse_error) -> never {
-      match (error) {
-        case http.status_error(status => status, body => body) ->
-          prelude.throw(error = http.classify_status(status = status, context = context, message = body))
-        // The residual is `fetch_error | parse_error` — rethrown as bound, no reconstruction.
-        case rest -> prelude.throw(error = rest)
-      }
-    }
-  }
-  // One request for both halves: the model this call targets and the key it authenticates with.
   let client = credential()
   http.post_json(
     url = f"https://generativelanguage.googleapis.com/v1beta/models/${client.model}:generateContent",
     body = { contents = [{ role = "user", parts = parts }] },
+    context = context,
     headers = { "x-goog-api-key" = client.api_key },
   )
 }
 
-@"The whole shared shape of both tools: make the generateContent call with the caller's @parts@, then
-hand back the reply's first image as a `file`. What is left in each tool above it is exactly the parts
-it builds — everything else (the endpoint, the header, the classification, the read of the reply) is
-written once here.
-
-A reply that carries no image part is the typed `no_image`, carrying whatever text the model sent
-instead (a refusal, a clarification) — never a panic. @context@ names the call (\"image edit\",
-\"image generation\") in every message this path can produce."
+@"Make the generateContent call with the caller's @parts@ and hand back the reply's first image as a
+`file`. A reply carrying no image part throws the typed `no_image` with whatever text the model sent
+instead; @context@ names the call in the message."
 agent generated_image(parts: array[unknown], context: string) -> file {
   let reply_parts = response_parts(response = generate_content(parts = parts, context = context))
-  // The first image part, via the flatten idiom (map each part to [file] or []).
   let images = array.flatten(target = for (let part in reply_parts) {
     next match (json.field(target = json.field(target = part, key = "inlineData"), key = "data")) {
       case string(data_text) -> [files.from_base64(content = data_text, content_type = part_content_type(part = part))]
@@ -127,7 +81,6 @@ agent generated_image(parts: array[unknown], context: string) -> file {
   })
   match (array.get(target = images, index = 0)) {
     case null -> {
-      // No image came back — surface whatever the model said instead (a refusal, a clarification).
       let texts = array.flatten(target = for (let part in reply_parts) {
         next match (json.field(target = part, key = "text")) {
           case string(text) -> [text]
@@ -142,9 +95,8 @@ agent generated_image(parts: array[unknown], context: string) -> file {
   }
 }
 
-// These docs name no sibling package's tool on purpose. This package cannot know which tools the
-// model holding it was given, and a doc that promises one the holder lacks sends the model chasing a
-// tool that is not there — which is how `send_files` kept being advertised after it was deleted.
+// These docs name no sibling package's tool: this package cannot know which tools the model holding
+// it was given, and naming an absent one sends the model chasing a tool that is not there.
 @"Tool: edit an image with an instruction (e.g. \"make the sky a sunset\", \"remove the text\").
 Pass the image's handle object — a bare {\"$katari_ref\": \"<id>\"} suffices; the result is a new image
 file, whose handle you can pass to any of your tools that take a file — to look at it, or to post it.
@@ -152,8 +104,6 @@ A reply without an image throws the typed `no_image` carrying the model's text."
 agent edit_image(image: file, instruction: string) -> file {
   generated_image(
     parts = [
-      // The file value sits directly in the `data` slot; `http.json` base64s it at the send
-      // boundary (no `read_base64`), exactly the ai package's gemini wire shape.
       { inlineData = { mimeType = files.content_type(value = image), "data" = image } },
       { text = instruction },
     ],
